@@ -195,6 +195,63 @@ impl EdgeTtsClient {
         let client = self.clone();
 
         Ok(Box::pin(try_stream! {
+            macro_rules! stream_chunk_with_fresh_socket {
+                (
+                    $chunk:expr,
+                    $cumulative_audio_bytes:ident,
+                    $audio_received:ident,
+                    $pending_error:ident,
+                    $buffered_events:expr
+                ) => {{
+                    let offset_compensation = offset_from_audio_bytes($cumulative_audio_bytes);
+                    let mut socket = match client.acquire_websocket().await {
+                        Ok(socket) => socket,
+                        Err(err) => {
+                            $pending_error = Some(err);
+                            break;
+                        }
+                    };
+                    match client.send_chunk_request(socket.stream_mut(), &options, $chunk).await {
+                        Ok(()) => {
+                            loop {
+                                match client
+                                    .read_chunk_frame(
+                                        socket.stream_mut(),
+                                        offset_compensation,
+                                        $buffered_events,
+                                    )
+                                    .await
+                                {
+                                    Ok(ChunkFrame::Event(event)) => {
+                                        if let SynthesisEvent::Audio(chunk) = &event {
+                                            $cumulative_audio_bytes += chunk.len();
+                                            $audio_received = true;
+                                        }
+                                        yield event;
+                                    }
+                                    Ok(ChunkFrame::Continue) => {}
+                                    Ok(ChunkFrame::TurnEnd) => break,
+                                    Err(failure) => {
+                                        socket.mark_dirty();
+                                        $pending_error = Some(failure.err);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(failure) => {
+                            socket.mark_dirty();
+                            $pending_error = Some(failure.err);
+                            break;
+                        }
+                    }
+
+                    if $pending_error.is_some() {
+                        break;
+                    }
+                }};
+            }
+
             let mut cumulative_audio_bytes = 0usize;
             let mut audio_received = false;
             let mut pending_error = None;
@@ -262,113 +319,29 @@ impl EdgeTtsClient {
                         }
                     }
 
-                    if fallback_at.is_some() {
-                        if let Some(socket) = shared_socket.as_mut() {
-                            socket.mark_dirty();
-                        }
-                    }
-
                     drop(shared_socket);
 
                     if let Some(start_index) = fallback_at {
                         for chunk in chunks.iter().skip(start_index) {
-                            let offset_compensation = offset_from_audio_bytes(cumulative_audio_bytes);
-                            let mut socket = match client.acquire_websocket().await {
-                                Ok(socket) => socket,
-                                Err(err) => {
-                                    pending_error = Some(err);
-                                    break;
-                                }
-                            };
-                            match client.send_chunk_request(socket.stream_mut(), &options, chunk).await {
-                                Ok(()) => {
-                                    loop {
-                                        match client
-                                            .read_chunk_frame(
-                                                socket.stream_mut(),
-                                                offset_compensation,
-                                                &mut buffered_events,
-                                            )
-                                            .await
-                                        {
-                                            Ok(ChunkFrame::Event(event)) => {
-                                                if let SynthesisEvent::Audio(chunk) = &event {
-                                                    cumulative_audio_bytes += chunk.len();
-                                                    audio_received = true;
-                                                }
-                                                yield event;
-                                            }
-                                            Ok(ChunkFrame::Continue) => {}
-                                            Ok(ChunkFrame::TurnEnd) => break,
-                                            Err(failure) => {
-                                                socket.mark_dirty();
-                                                pending_error = Some(failure.err);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(failure) => {
-                                    socket.mark_dirty();
-                                    pending_error = Some(failure.err);
-                                    break;
-                                }
-                            }
-
-                            if pending_error.is_some() {
-                                break;
-                            }
+                            stream_chunk_with_fresh_socket!(
+                                chunk,
+                                cumulative_audio_bytes,
+                                audio_received,
+                                pending_error,
+                                &mut buffered_events
+                            );
                         }
                     }
                 }
             } else {
                 for chunk in &chunks {
-                    let offset_compensation = offset_from_audio_bytes(cumulative_audio_bytes);
-                    let mut socket = match client.acquire_websocket().await {
-                        Ok(socket) => socket,
-                        Err(err) => {
-                            pending_error = Some(err);
-                            break;
-                        }
-                    };
-                    match client.send_chunk_request(socket.stream_mut(), &options, chunk).await {
-                        Ok(()) => {
-                            loop {
-                                match client
-                                    .read_chunk_frame(
-                                        socket.stream_mut(),
-                                        offset_compensation,
-                                        &mut buffered_events,
-                                    )
-                                    .await
-                                {
-                                    Ok(ChunkFrame::Event(event)) => {
-                                        if let SynthesisEvent::Audio(chunk) = &event {
-                                            cumulative_audio_bytes += chunk.len();
-                                            audio_received = true;
-                                        }
-                                        yield event;
-                                    }
-                                    Ok(ChunkFrame::Continue) => {}
-                                    Ok(ChunkFrame::TurnEnd) => break,
-                                    Err(failure) => {
-                                        socket.mark_dirty();
-                                        pending_error = Some(failure.err);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(failure) => {
-                            socket.mark_dirty();
-                            pending_error = Some(failure.err);
-                            break;
-                        }
-                    }
-
-                    if pending_error.is_some() {
-                        break;
-                    }
+                    stream_chunk_with_fresh_socket!(
+                        chunk,
+                        cumulative_audio_bytes,
+                        audio_received,
+                        pending_error,
+                        &mut buffered_events
+                    );
                 }
             }
 
