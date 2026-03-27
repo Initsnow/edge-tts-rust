@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -8,6 +9,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use reqwest::Client;
 use tokio::fs;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
@@ -52,24 +54,33 @@ struct WsPool {
     target_idle: usize,
     idle_ttl: Duration,
     warmup: bool,
+    next_id: AtomicU64,
     state: Mutex<WsPoolState>,
 }
 
 #[derive(Debug, Default)]
 struct WsPoolState {
-    idle: Vec<IdleWs>,
+    entries: Vec<Arc<PoolEntry>>,
     warming: usize,
 }
 
 #[derive(Debug)]
-struct IdleWs {
-    stream: WsStream,
-    returned_at: Instant,
+struct PoolEntry {
+    id: u64,
+    stream: Arc<AsyncMutex<WsStream>>,
+    state: Mutex<PoolEntryState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PoolEntryState {
+    Idle { returned_at: Instant },
+    Busy,
 }
 
 #[derive(Debug)]
 struct PooledWebsocket {
-    stream: Option<WsStream>,
+    entry: Option<Arc<PoolEntry>>,
+    stream: Option<OwnedMutexGuard<WsStream>>,
     reusable: bool,
     pool: Arc<WsPool>,
 }
@@ -146,6 +157,7 @@ impl EdgeTtsClientBuilder {
                 target_idle: self.ws_pool_size,
                 idle_ttl: self.ws_idle_ttl,
                 warmup: self.ws_warmup,
+                next_id: AtomicU64::new(1),
                 state: Mutex::new(WsPoolState::default()),
             }),
         };
@@ -232,6 +244,10 @@ impl EdgeTtsClient {
                                     Ok(ChunkFrame::Continue) => {}
                                     Ok(ChunkFrame::TurnEnd) => break,
                                     Err(failure) => {
+                                        pool_log(&format!(
+                                            "fresh socket read failure retryable={}",
+                                            failure.retryable_on_fresh_connection
+                                        ));
                                         socket.mark_dirty();
                                         $pending_error = Some(failure.err);
                                         break;
@@ -240,6 +256,10 @@ impl EdgeTtsClient {
                             }
                         }
                         Err(failure) => {
+                            pool_log(&format!(
+                                "fresh socket send failure retryable={}",
+                                failure.retryable_on_fresh_connection
+                            ));
                             socket.mark_dirty();
                             $pending_error = Some(failure.err);
                             break;
@@ -292,8 +312,15 @@ impl EdgeTtsClient {
                                         Ok(ChunkFrame::Continue) => {}
                                         Ok(ChunkFrame::TurnEnd) => break,
                                         Err(failure) => {
+                                            pool_log(&format!(
+                                                "reused socket read failure at chunk={index} retryable={}",
+                                                failure.retryable_on_fresh_connection
+                                            ));
                                             socket.mark_dirty();
                                             if index > 0 && failure.retryable_on_fresh_connection {
+                                                pool_log(&format!(
+                                                    "fallback retryable frame failure at chunk={index}"
+                                                ));
                                                 fallback_at = Some(index);
                                             } else {
                                                 pending_error = Some(failure.err);
@@ -304,8 +331,15 @@ impl EdgeTtsClient {
                                 }
                             }
                             Err(failure) => {
+                                pool_log(&format!(
+                                    "reused socket send failure at chunk={index} retryable={}",
+                                    failure.retryable_on_fresh_connection
+                                ));
                                 socket.mark_dirty();
                                 if index > 0 && failure.retryable_on_fresh_connection {
+                                    pool_log(&format!(
+                                        "fallback retryable send failure at chunk={index}"
+                                    ));
                                     fallback_at = Some(index);
                                     break;
                                 }
@@ -563,37 +597,46 @@ impl EdgeTtsClient {
     }
 
     async fn acquire_websocket(&self) -> Result<PooledWebsocket> {
-        if let Some(stream) = self.take_idle_websocket() {
+        if let Some(entry) = self.take_idle_websocket() {
+            pool_log("ws_pool hit");
             self.ensure_warm_pool();
             return Ok(PooledWebsocket {
-                stream: Some(stream),
+                stream: Some(entry.stream.clone().lock_owned().await),
+                entry: Some(entry),
                 reusable: true,
                 pool: Arc::clone(&self.ws_pool),
             });
         }
 
+        pool_log("ws_pool miss");
         let stream = self.connect_websocket_fresh().await?;
+        let entry = self.ws_pool.insert_busy(stream);
         self.ensure_warm_pool();
         Ok(PooledWebsocket {
-            stream: Some(stream),
+            stream: Some(entry.stream.clone().lock_owned().await),
+            entry: Some(entry),
             reusable: true,
             pool: Arc::clone(&self.ws_pool),
         })
     }
 
-    fn take_idle_websocket(&self) -> Option<WsStream> {
+    fn take_idle_websocket(&self) -> Option<Arc<PoolEntry>> {
         if self.ws_pool.target_idle == 0 {
+            pool_log("ws_pool disabled");
             return None;
         }
 
         let mut state = self.ws_pool.state.lock().expect("websocket pool poisoned");
-        let now = Instant::now();
-        while let Some(idle) = state.idle.pop() {
-            if self.ws_pool.is_expired(idle.returned_at, now) {
-                continue;
+        self.ws_pool.cleanup_expired_locked(&mut state, Instant::now());
+        for entry in &state.entries {
+            let mut entry_state = entry.state.lock().expect("pool entry poisoned");
+            if matches!(*entry_state, PoolEntryState::Idle { .. }) {
+                *entry_state = PoolEntryState::Busy;
+                pool_log("ws_pool took idle socket candidate");
+                return Some(Arc::clone(entry));
             }
-            return Some(idle.stream);
         }
+        pool_log("ws_pool empty");
         None
     }
 
@@ -604,12 +647,11 @@ impl EdgeTtsClient {
 
         let to_spawn = {
             let mut state = self.ws_pool.state.lock().expect("websocket pool poisoned");
-            state
-                .idle
-                .retain(|idle| !self.ws_pool.is_expired(idle.returned_at, Instant::now()));
-            let missing = self
-                .ws_pool
-                .replenishment_needed(state.idle.len(), state.warming);
+            self.ws_pool.cleanup_expired_locked(&mut state, Instant::now());
+            let missing = self.ws_pool.replenishment_needed(
+                self.ws_pool.idle_count_locked(&state),
+                state.warming,
+            );
             state.warming += missing;
             missing
         };
@@ -626,11 +668,9 @@ impl EdgeTtsClient {
                         .expect("websocket pool poisoned");
                     state.warming = state.warming.saturating_sub(1);
                     if let Some(stream) = stream {
-                        if state.idle.len() < client.ws_pool.target_idle {
-                            state.idle.push(IdleWs {
-                                stream,
-                                returned_at: Instant::now(),
-                            });
+                        if client.ws_pool.idle_count_locked(&state) < client.ws_pool.target_idle {
+                            pool_log("ws_pool warmup added idle socket");
+                            state.entries.push(client.ws_pool.new_idle_entry(stream));
                         }
                     }
                 }
@@ -682,26 +722,133 @@ impl PooledWebsocket {
 
 impl Drop for PooledWebsocket {
     fn drop(&mut self) {
-        let Some(stream) = self.stream.take() else {
+        let Some(_stream) = self.stream.take() else {
+            return;
+        };
+        let Some(entry) = self.entry.take() else {
             return;
         };
         if !self.reusable || self.pool.target_idle == 0 {
+            self.pool.remove_entry(entry.id);
             return;
         }
 
+        let returned_at = Instant::now();
+        {
+            let mut entry_state = entry.state.lock().expect("pool entry poisoned");
+            *entry_state = PoolEntryState::Idle { returned_at };
+        }
+
         let mut state = self.pool.state.lock().expect("websocket pool poisoned");
-        if state.idle.len() < self.pool.target_idle {
-            state.idle.push(IdleWs {
-                stream,
-                returned_at: Instant::now(),
-            });
+        self.pool.cleanup_expired_locked(&mut state, returned_at);
+        let replaced = self.pool.trim_idle_locked(&mut state, entry.id);
+        if replaced {
+            pool_log("ws_pool replace oldest idle socket with recently used socket");
+        } else {
+            pool_log("ws_pool return socket to idle");
         }
     }
 }
 
 impl WsPool {
+    fn new_idle_entry(&self, stream: WsStream) -> Arc<PoolEntry> {
+        Arc::new(PoolEntry {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            stream: Arc::new(AsyncMutex::new(stream)),
+            state: Mutex::new(PoolEntryState::Idle {
+                returned_at: Instant::now(),
+            }),
+        })
+    }
+
+    fn insert_busy(&self, stream: WsStream) -> Arc<PoolEntry> {
+        let entry = Arc::new(PoolEntry {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            stream: Arc::new(AsyncMutex::new(stream)),
+            state: Mutex::new(PoolEntryState::Busy),
+        });
+        let mut state = self.state.lock().expect("websocket pool poisoned");
+        state.entries.push(Arc::clone(&entry));
+        entry
+    }
+
+    fn remove_entry(&self, entry_id: u64) {
+        let mut state = self.state.lock().expect("websocket pool poisoned");
+        state.entries.retain(|entry| entry.id != entry_id);
+    }
+
     fn is_expired(&self, returned_at: Instant, now: Instant) -> bool {
         now.saturating_duration_since(returned_at) >= self.idle_ttl
+    }
+
+    fn idle_count_locked(&self, state: &WsPoolState) -> usize {
+        state
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    *entry.state.lock().expect("pool entry poisoned"),
+                    PoolEntryState::Idle { .. }
+                )
+            })
+            .count()
+    }
+
+    fn cleanup_expired_locked(&self, state: &mut WsPoolState, now: Instant) {
+        state.entries.retain(|entry| {
+            let entry_state = entry.state.lock().expect("pool entry poisoned");
+            match *entry_state {
+                PoolEntryState::Idle { returned_at } if self.is_expired(returned_at, now) => {
+                    pool_log("ws_pool drop expired idle socket");
+                    false
+                }
+                _ => true,
+            }
+        });
+    }
+
+    fn trim_idle_locked(&self, state: &mut WsPoolState, keep_entry_id: u64) -> bool {
+        let mut idle_entries = state
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let entry_state = entry.state.lock().expect("pool entry poisoned");
+                match *entry_state {
+                    PoolEntryState::Idle { returned_at } => Some((entry.id, returned_at)),
+                    PoolEntryState::Busy => None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if idle_entries.len() <= self.target_idle {
+            return false;
+        }
+
+        idle_entries.sort_by_key(|(_, returned_at)| *returned_at);
+        let mut removed = false;
+        let overflow = idle_entries.len().saturating_sub(self.target_idle);
+        let mut to_remove = HashSet::with_capacity(overflow);
+        for (entry_id, _) in idle_entries {
+            if to_remove.len() == overflow {
+                break;
+            }
+            if entry_id == keep_entry_id {
+                continue;
+            }
+            to_remove.insert(entry_id);
+        }
+
+        if !to_remove.is_empty() {
+            state.entries.retain(|entry| {
+                let should_keep = !to_remove.contains(&entry.id);
+                if !should_keep {
+                    removed = true;
+                }
+                should_keep
+            });
+        }
+
+        removed
     }
 
     fn replenishment_needed(&self, idle_len: usize, warming: usize) -> usize {
@@ -723,6 +870,14 @@ fn debug_frame(kind: &str, payload: &[u8]) {
     }
 }
 
+fn pool_log(message: &str) {
+    #[cfg(not(debug_assertions))]
+    let _ = message;
+
+    #[cfg(debug_assertions)]
+    eprintln!("{message}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +897,7 @@ mod tests {
             target_idle: 2,
             idle_ttl: Duration::from_secs(15),
             warmup: true,
+            next_id: AtomicU64::new(1),
             state: Mutex::new(WsPoolState::default()),
         };
 
@@ -757,6 +913,7 @@ mod tests {
             target_idle: 1,
             idle_ttl: Duration::from_secs(15),
             warmup: true,
+            next_id: AtomicU64::new(1),
             state: Mutex::new(WsPoolState::default()),
         };
         let now = Instant::now();
