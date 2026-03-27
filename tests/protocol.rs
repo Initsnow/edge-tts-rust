@@ -6,7 +6,10 @@ use edge_tts_rust::{
 #[test]
 fn text_headers_strip_separator() {
     let frame = b"Path:audio.metadata\r\nX-RequestId:abc\r\n\r\n{\"Metadata\":[]}";
-    let header_end = frame.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+    let header_end = frame
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
     let (headers, payload) = parse_headers(frame, header_end).unwrap();
     assert_eq!(headers.get("Path").unwrap(), "audio.metadata");
     assert_eq!(payload, br#"{"Metadata":[]}"#);
@@ -43,7 +46,10 @@ fn metadata_unescapes_xml_text() {
 
 #[test]
 fn split_text_rejects_zero_limit() {
-    assert!(matches!(split_text("hello", 0), Err(Error::InvalidChunkSize)));
+    assert!(matches!(
+        split_text("hello", 0),
+        Err(Error::InvalidChunkSize)
+    ));
 }
 
 #[test]
