@@ -5,6 +5,7 @@ High-performance, async-first Rust client for Microsoft Edge Read Aloud TTS.
 ## Features
 
 - Async streaming synthesis for long text and backend workloads
+- Warm WebSocket pooling with idle TTL and request-level chunk reuse
 - Voice listing, rate, volume, pitch, and word/sentence boundary timestamps
 - Library API and simple CLI
 - Unit tests, integration tests, and optional live tests
@@ -74,6 +75,23 @@ async fn main() -> edge_tts_rust::Result<()> {
     Ok(())
 }
 ```
+
+Transport tuning:
+
+```rust
+use std::time::Duration;
+
+use edge_tts_rust::EdgeTtsClient;
+
+let client = EdgeTtsClient::builder()
+    .ws_pool_size(2)
+    .ws_idle_ttl(Duration::from_secs(15))
+    .ws_warmup(true)
+    .request_chunk_reuse(true)
+    .build()?;
+```
+
+The default client already enables pooled WebSocket warmup and chunk reuse.
 
 ## Testing
 
