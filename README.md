@@ -10,6 +10,13 @@ High-performance, async-first Rust client for Microsoft Edge Read Aloud TTS.
 - Library API and simple CLI
 - Unit tests, integration tests, and optional live tests
 
+## API
+
+- `EdgeTtsClient::new()` enables the default pooled transport
+- `EdgeTtsClient::builder()` lets you tune timeouts, warmup, pool size, idle TTL, and chunk reuse
+- `list_voices()`, `stream()`, `synthesize()`, and `save()` cover the main client workflows
+- `normalize_voice()` converts short voice names into the full Edge voice identifier
+
 ## Build
 
 ```bash
