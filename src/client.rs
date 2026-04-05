@@ -576,7 +576,7 @@ impl EdgeTtsClient {
                 }
             }
             Ok(tokio_tungstenite::tungstenite::Message::Close(frame)) => {
-                if std::env::var_os("EDGE_TTS_DEBUG").is_some() {
+                if debug_enabled() {
                     eprintln!("[edge-tts-debug] close: {frame:?}");
                 }
                 Err(ChunkFailure {
@@ -627,7 +627,8 @@ impl EdgeTtsClient {
         }
 
         let mut state = self.ws_pool.state.lock().expect("websocket pool poisoned");
-        self.ws_pool.cleanup_expired_locked(&mut state, Instant::now());
+        self.ws_pool
+            .cleanup_expired_locked(&mut state, Instant::now());
         for entry in &state.entries {
             let mut entry_state = entry.state.lock().expect("pool entry poisoned");
             if matches!(*entry_state, PoolEntryState::Idle { .. }) {
@@ -647,11 +648,11 @@ impl EdgeTtsClient {
 
         let to_spawn = {
             let mut state = self.ws_pool.state.lock().expect("websocket pool poisoned");
-            self.ws_pool.cleanup_expired_locked(&mut state, Instant::now());
-            let missing = self.ws_pool.replenishment_needed(
-                self.ws_pool.idle_count_locked(&state),
-                state.warming,
-            );
+            self.ws_pool
+                .cleanup_expired_locked(&mut state, Instant::now());
+            let missing = self
+                .ws_pool
+                .replenishment_needed(self.ws_pool.idle_count_locked(&state), state.warming);
             state.warming += missing;
             missing
         };
@@ -862,7 +863,7 @@ pub fn subtitles(events: &[BoundaryEvent]) -> String {
 }
 
 fn debug_frame(kind: &str, payload: &[u8]) {
-    if std::env::var_os("EDGE_TTS_DEBUG").is_some() {
+    if debug_enabled() {
         eprintln!(
             "[edge-tts-debug] {kind}: {}",
             String::from_utf8_lossy(payload)
@@ -870,12 +871,14 @@ fn debug_frame(kind: &str, payload: &[u8]) {
     }
 }
 
-fn pool_log(message: &str) {
-    #[cfg(not(debug_assertions))]
-    let _ = message;
+fn debug_enabled() -> bool {
+    std::env::var_os("EDGE_TTS_DEBUG").is_some()
+}
 
-    #[cfg(debug_assertions)]
-    eprintln!("{message}");
+fn pool_log(message: &str) {
+    if debug_enabled() {
+        eprintln!("[edge-tts-debug] {message}");
+    }
 }
 
 #[cfg(test)]
