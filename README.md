@@ -112,6 +112,30 @@ Run the optional live test:
 EDGE_TTS_ONLINE_TEST=1 cargo test --test live
 ```
 
+Run the repeated-request long-connection test and print pooled-vs-fresh metrics:
+
+```bash
+EDGE_TTS_ONLINE_TEST=1 EDGE_TTS_LONG_CONNECTION_TEST=1 EDGE_TTS_LONG_CONNECTION_ITERATIONS=50 cargo test --test live -- --nocapture
+```
+
+This reports total time plus per-request average, p50, p95, and max latency for:
+
+- `ws_pool_size=1` with connection reuse enabled
+- `ws_pool_size=0` with a fresh websocket for each request
+
+Run the long-text streaming test and compare first-audio latency for chunk reuse:
+
+```bash
+EDGE_TTS_ONLINE_TEST=1 EDGE_TTS_LONG_TEXT_TEST=1 EDGE_TTS_LONG_TEXT_ITERATIONS=2 EDGE_TTS_LONG_TEXT_SECTIONS=24 cargo test --test live -- --nocapture
+```
+
+This uses one long-form text that spans multiple protocol chunks and reports:
+
+- `first_audio_*` latency, which is closer to interactive playback experience
+- `total_*` latency for the full synthesis
+- `request_chunk_reuse=true` versus `request_chunk_reuse=false`
+- `EDGE_TTS_LONG_TEXT_SECTIONS` can scale the test input up or down
+
 Run benchmarks:
 
 ```bash
