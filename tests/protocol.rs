@@ -79,6 +79,21 @@ fn ssml_escapes_special_characters() {
 }
 
 #[test]
+fn split_and_build_ssml_does_not_double_escape() {
+    let chunks = split_text("Fish & Chips", 4096).unwrap();
+    let ssml = build_ssml(
+        "Microsoft Server Speech Text to Speech Voice (en-US, EmmaMultilingualNeural)",
+        "+0%",
+        "+0%",
+        "+0Hz",
+        &chunks[0],
+    );
+    assert!(ssml.contains("Fish &amp; Chips"), "expected Fish &amp; Chips, got: {ssml}");
+    assert!(!ssml.contains("Fish &amp;amp; Chips"), "detected double escaping: {ssml}");
+}
+
+
+#[test]
 fn srt_output_is_stable() {
     let srt = to_srt(&[BoundaryEvent {
         kind: Boundary::Sentence,

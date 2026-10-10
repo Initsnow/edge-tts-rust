@@ -19,7 +19,7 @@ impl Boundary {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceTag {
     #[serde(rename = "ContentCategories", default)]
     pub content_categories: Vec<String>,
@@ -27,14 +27,6 @@ pub struct VoiceTag {
     pub voice_personalities: Vec<String>,
 }
 
-impl Default for VoiceTag {
-    fn default() -> Self {
-        Self {
-            content_categories: Vec::new(),
-            voice_personalities: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Voice {

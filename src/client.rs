@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_stream::try_stream;
-use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use reqwest::Client;
 use tokio::fs;
@@ -20,9 +19,8 @@ use crate::error::{Error, Result};
 use crate::options::SpeakOptions;
 use crate::protocol::{
     cbr_bitrate_bps, generate_connection_id, generate_muid, generate_sec_ms_gec,
-    offset_from_audio_bytes_with_bitrate, parse_binary_headers, parse_headers, parse_metadata,
-    sec_ms_gec_version, speech_config_message, split_text, ssml_message, voice_headers,
-    websocket_headers,
+    offset_from_audio_bytes_with_bitrate, parse_metadata, sec_ms_gec_version,
+    speech_config_message, split_text, ssml_message, voice_headers, websocket_headers,
 };
 use crate::subtitles::{filter_boundaries, to_srt};
 use crate::types::{BoundaryEvent, SynthesisEvent, SynthesisResult, Voice};
@@ -272,7 +270,10 @@ impl EdgeTtsClient {
                                         yield event;
                                     }
                                     Ok(ChunkFrame::Continue) => {}
-                                    Ok(ChunkFrame::TurnEnd) => break,
+                                    Ok(ChunkFrame::TurnEnd) => {
+                                        socket.mark_reusable();
+                                        break;
+                                    }
                                     Err(failure) => {
                                         pool_log(&format!(
                                             "fresh socket read failure retryable={}",
@@ -354,7 +355,7 @@ impl EdgeTtsClient {
                                                 failure.retryable_on_fresh_connection
                                             ));
                                             socket.mark_dirty();
-                                            if index > 0 && failure.retryable_on_fresh_connection {
+                                            if failure.retryable_on_fresh_connection {
                                                 pool_log(&format!(
                                                     "fallback retryable frame failure at chunk={index}"
                                                 ));
@@ -373,7 +374,7 @@ impl EdgeTtsClient {
                                     failure.retryable_on_fresh_connection
                                 ));
                                 socket.mark_dirty();
-                                if index > 0 && failure.retryable_on_fresh_connection {
+                                if failure.retryable_on_fresh_connection {
                                     pool_log(&format!(
                                         "fallback retryable send failure at chunk={index}"
                                     ));
@@ -390,7 +391,11 @@ impl EdgeTtsClient {
                         }
                     }
 
+                    if fallback_at.is_none() && pending_error.is_none() {
+                        socket.mark_reusable();
+                    }
                     drop(shared_socket);
+
 
                     if let Some(start_index) = fallback_at {
                         for chunk in chunks.iter().skip(start_index) {
@@ -436,7 +441,7 @@ impl EdgeTtsClient {
         options: SpeakOptions,
     ) -> Result<SynthesisResult> {
         let mut stream = self.stream(text, options).await?;
-        let mut audio = Vec::new();
+        let mut audio = Vec::with_capacity(64 * 1024);
         let mut boundaries = Vec::new();
 
         while let Some(event) = stream.next().await {
@@ -448,6 +453,7 @@ impl EdgeTtsClient {
 
         Ok(SynthesisResult { audio, boundaries })
     }
+
 
     pub async fn save(
         &self,
@@ -535,12 +541,23 @@ impl EdgeTtsClient {
                         err: Error::MissingHeaders,
                         retryable_on_fresh_connection: false,
                     })?;
-                let (headers, payload) =
-                    parse_headers(data, header_end).map_err(|err| ChunkFailure {
-                        err,
+                let header_str = std::str::from_utf8(&data[..header_end]).map_err(|_| {
+                    ChunkFailure {
+                        err: Error::UnexpectedResponse("headers are not valid utf-8"),
                         retryable_on_fresh_connection: false,
-                    })?;
-                match headers.get("Path").map(String::as_str) {
+                    }
+                })?;
+                let mut path = None;
+                for line in header_str.split("\r\n").filter(|line| !line.is_empty()) {
+                    if let Some((key, value)) = line.split_once(':')
+                        && key.eq_ignore_ascii_case("Path")
+                    {
+                        path = Some(value.trim());
+                        break;
+                    }
+                }
+                let payload = &data[header_end + 4..];
+                match path {
                     Some("audio.metadata") => {
                         let events =
                             parse_metadata(payload, offset_compensation).map_err(|err| {
@@ -581,30 +598,60 @@ impl EdgeTtsClient {
                     });
                 }
                 let header_length = u16::from_be_bytes([frame[0], frame[1]]) as usize;
-                let (headers, payload) =
-                    parse_binary_headers(&frame, header_length).map_err(|err| ChunkFailure {
-                        err,
+                let header_start = 2usize;
+                let header_end = header_start
+                    .checked_add(header_length)
+                    .ok_or(ChunkFailure {
+                        err: Error::UnexpectedResponse("binary header length overflow"),
                         retryable_on_fresh_connection: false,
                     })?;
-                if headers.get("Path").map(String::as_str) != Some("audio") {
+                if header_end > frame.len() {
+                    return Err(ChunkFailure {
+                        err: Error::UnexpectedResponse("binary header length exceeds frame length"),
+                        retryable_on_fresh_connection: false,
+                    });
+                }
+                let header_str = std::str::from_utf8(&frame[header_start..header_end]).map_err(|_| {
+                    ChunkFailure {
+                        err: Error::UnexpectedResponse("headers are not valid utf-8"),
+                        retryable_on_fresh_connection: false,
+                    }
+                })?;
+                let mut path = None;
+                let mut content_type = None;
+                for line in header_str.split("\r\n").filter(|line| !line.is_empty()) {
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("Path") {
+                            path = Some(value.trim());
+                        } else if key.eq_ignore_ascii_case("Content-Type") {
+                            content_type = Some(value.trim());
+                        }
+                    }
+                }
+                if path != Some("audio") {
                     return Err(ChunkFailure {
                         err: Error::UnexpectedResponse("binary frame path was not audio"),
                         retryable_on_fresh_connection: false,
                     });
                 }
-                match headers.get("Content-Type").map(String::as_str) {
-                    Some(content_type) if content_type.starts_with("audio/") => {
-                        if payload.is_empty() {
+                let mut payload_start = header_end;
+                if frame.get(payload_start..).is_some_and(|s| s.starts_with(b"\r\n")) {
+                    payload_start += 2;
+                }
+                let payload_len = frame.len() - payload_start;
+                match content_type {
+                    Some(ct) if ct.starts_with("audio/") => {
+                        if payload_len == 0 {
                             return Err(ChunkFailure {
                                 err: Error::UnexpectedResponse("audio frame missing payload"),
                                 retryable_on_fresh_connection: false,
                             });
                         }
                         Ok(ChunkFrame::Event(SynthesisEvent::Audio(
-                            Bytes::copy_from_slice(payload),
+                            frame.slice(payload_start..),
                         )))
                     }
-                    None if payload.is_empty() => Ok(ChunkFrame::Continue),
+                    None if payload_len == 0 => Ok(ChunkFrame::Continue),
                     None => Err(ChunkFailure {
                         err: Error::UnexpectedResponse(
                             "binary frame had payload without content type",
@@ -645,7 +692,7 @@ impl EdgeTtsClient {
             return Ok(PooledWebsocket {
                 stream: Some(entry.stream.clone().lock_owned().await),
                 entry: Some(entry),
-                reusable: true,
+                reusable: false,
                 pool: Arc::clone(&self.ws_pool),
             });
         }
@@ -657,7 +704,7 @@ impl EdgeTtsClient {
         Ok(PooledWebsocket {
             stream: Some(entry.stream.clone().lock_owned().await),
             entry: Some(entry),
-            reusable: true,
+            reusable: false,
             pool: Arc::clone(&self.ws_pool),
         })
     }
@@ -703,21 +750,18 @@ impl EdgeTtsClient {
             let client = self.clone();
             tokio::spawn(async move {
                 let stream = client.connect_websocket_fresh().await.ok();
+                let mut state = client
+                    .ws_pool
+                    .state
+                    .lock()
+                    .expect("websocket pool poisoned");
+                state.warming = state.warming.saturating_sub(1);
+                if let Some(stream) = stream
+                    && client.ws_pool.idle_count_locked(&state) < client.ws_pool.target_idle
                 {
-                    let mut state = client
-                        .ws_pool
-                        .state
-                        .lock()
-                        .expect("websocket pool poisoned");
-                    state.warming = state.warming.saturating_sub(1);
-                    if let Some(stream) = stream {
-                        if client.ws_pool.idle_count_locked(&state) < client.ws_pool.target_idle {
-                            pool_log("ws_pool warmup added idle socket");
-                            state.entries.push(client.ws_pool.new_idle_entry(stream));
-                        }
-                    }
+                    pool_log("ws_pool warmup added idle socket");
+                    state.entries.push(client.ws_pool.new_idle_entry(stream));
                 }
-                client.ensure_warm_pool();
             });
         }
     }
@@ -756,6 +800,10 @@ impl PooledWebsocket {
         self.stream
             .as_mut()
             .expect("pooled websocket missing stream")
+    }
+
+    fn mark_reusable(&mut self) {
+        self.reusable = true;
     }
 
     fn mark_dirty(&mut self) {
@@ -935,6 +983,7 @@ mod tests {
         assert!(builder.ws_warmup);
         assert!(builder.request_chunk_reuse);
     }
+
 
     #[test]
     fn pool_replenishment_respects_idle_and_warming_counts() {

@@ -24,7 +24,13 @@ pub fn generate_connection_id() -> String {
 pub fn generate_muid() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = String::with_capacity(32);
+    for byte in bytes {
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    s
 }
 
 pub fn generate_sec_ms_gec(now: SystemTime) -> String {
@@ -91,21 +97,56 @@ pub fn build_ssml(voice: &str, rate: &str, volume: &str, pitch: &str, text: &str
 }
 
 pub fn escape_ssml_text(text: &str) -> String {
-    let sanitized = text
-        .chars()
-        .map(|ch| match ch as u32 {
-            0..=8 | 11..=12 | 14..=31 => ' ',
-            _ => ch,
-        })
-        .collect::<String>();
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(bytes.len() + bytes.len() / 8);
+    let mut last = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let replacement = match b {
+            0..=8 | 11..=12 | 14..=31 => Some(" "),
+            b'<' => Some("&lt;"),
+            b'>' => Some("&gt;"),
+            b'"' => Some("&quot;"),
+            b'\'' => Some("&apos;"),
+            b'&' => {
+                let rest = &bytes[i + 1..];
+                if rest.starts_with(b"amp;")
+                    || rest.starts_with(b"lt;")
+                    || rest.starts_with(b"gt;")
+                    || rest.starts_with(b"quot;")
+                    || rest.starts_with(b"apos;")
+                {
+                    None
+                } else {
+                    Some("&amp;")
+                }
+            }
+            _ => None,
+        };
 
-    sanitized
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+        if let Some(rep) = replacement {
+            if i > last {
+                result.push_str(&text[last..i]);
+            }
+            result.push_str(rep);
+            i += 1;
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if last == 0 {
+        return text.to_owned();
+    }
+    if last < bytes.len() {
+        result.push_str(&text[last..]);
+    }
+    result
 }
+
+
 
 pub fn split_text(text: &str, max_bytes: usize) -> Result<Vec<String>> {
     if max_bytes == 0 {
@@ -259,7 +300,7 @@ struct MetadataText {
 
 pub fn parse_metadata(payload: &[u8], offset_compensation: u64) -> Result<Vec<SynthesisEvent>> {
     let envelope: MetadataEnvelope = serde_json::from_slice(payload)?;
-    let mut events = Vec::new();
+    let mut events = Vec::with_capacity(envelope.metadata.len());
 
     for item in envelope.metadata {
         match item.kind.as_str() {
@@ -289,15 +330,11 @@ pub fn parse_metadata(payload: &[u8], offset_compensation: u64) -> Result<Vec<Sy
 
 pub fn cbr_bitrate_bps(output_format: &str) -> Option<u64> {
     for part in output_format.split('-') {
-        if let Some(kbits) = part.strip_suffix("kbitrate") {
-            if let Ok(val) = kbits.parse::<u64>() {
-                return Some(val * 1000);
-            }
+        if let Some(val) = part.strip_suffix("kbitrate").and_then(|k| k.parse::<u64>().ok()) {
+            return Some(val * 1000);
         }
-        if let Some(kbps) = part.strip_suffix("kbps") {
-            if let Ok(val) = kbps.parse::<u64>() {
-                return Some(val * 1000);
-            }
+        if let Some(val) = part.strip_suffix("kbps").and_then(|k| k.parse::<u64>().ok()) {
+            return Some(val * 1000);
         }
     }
     None
@@ -316,6 +353,9 @@ pub fn offset_from_audio_bytes_with_bitrate(bytes: usize, bitrate_bps: u64) -> u
 }
 
 fn unescape_xml(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_owned();
+    }
     text.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
