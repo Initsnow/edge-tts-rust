@@ -1,7 +1,10 @@
 pub const BASE_URL: &str = "speech.platform.bing.com/consumer/speech/synthesize/readaloud";
 pub const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 pub const DEFAULT_VOICE: &str = "en-US-EmmaMultilingualNeural";
-pub const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
+pub const DEFAULT_OUTPUT_FORMAT: &str = "webm-24khz-16bit-mono-opus";
+pub const DEFAULT_OUTPUT_FORMAT_OPUS: &str = "webm-24khz-16bit-mono-opus";
+pub const DEFAULT_OUTPUT_FORMAT_MP3: &str = "audio-24khz-48kbitrate-mono-mp3";
+pub const OUTPUT_FORMAT: &str = DEFAULT_OUTPUT_FORMAT;
 pub const TEXT_CHUNK_LIMIT: usize = 4096;
 pub const TICKS_PER_SECOND: u64 = 10_000_000;
 pub const MP3_BITRATE_BPS: u64 = 48_000;

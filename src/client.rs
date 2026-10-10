@@ -15,13 +15,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
-use crate::constants::{TEXT_CHUNK_LIMIT, voice_list_url, websocket_url};
+use crate::constants::{DEFAULT_OUTPUT_FORMAT, TEXT_CHUNK_LIMIT, voice_list_url, websocket_url};
 use crate::error::{Error, Result};
 use crate::options::SpeakOptions;
 use crate::protocol::{
-    generate_connection_id, generate_muid, generate_sec_ms_gec, offset_from_audio_bytes,
-    parse_binary_headers, parse_headers, parse_metadata, sec_ms_gec_version, speech_config_message,
-    split_text, ssml_message, voice_headers, websocket_headers,
+    cbr_bitrate_bps, generate_connection_id, generate_muid, generate_sec_ms_gec,
+    offset_from_audio_bytes_with_bitrate, parse_binary_headers, parse_headers, parse_metadata,
+    sec_ms_gec_version, speech_config_message, split_text, ssml_message, voice_headers,
+    websocket_headers,
 };
 use crate::subtitles::{filter_boundaries, to_srt};
 use crate::types::{BoundaryEvent, SynthesisEvent, SynthesisResult, Voice};
@@ -36,6 +37,7 @@ pub struct EdgeTtsClient {
     connect_timeout: Duration,
     receive_timeout: Duration,
     request_chunk_reuse: bool,
+    default_output_format: Option<String>,
     ws_pool: Arc<WsPool>,
 }
 
@@ -47,6 +49,7 @@ pub struct EdgeTtsClientBuilder {
     ws_idle_ttl: Duration,
     ws_warmup: bool,
     request_chunk_reuse: bool,
+    default_output_format: Option<String>,
 }
 
 #[derive(Debug)]
@@ -107,6 +110,7 @@ impl Default for EdgeTtsClientBuilder {
             ws_idle_ttl: Duration::from_secs(15),
             ws_warmup: true,
             request_chunk_reuse: true,
+            default_output_format: None,
         }
     }
 }
@@ -142,6 +146,11 @@ impl EdgeTtsClientBuilder {
         self
     }
 
+    pub fn default_output_format(mut self, format: impl Into<String>) -> Self {
+        self.default_output_format = Some(format.into());
+        self
+    }
+
     pub fn build(self) -> Result<EdgeTtsClient> {
         let http = Client::builder()
             .connect_timeout(self.connect_timeout)
@@ -153,6 +162,7 @@ impl EdgeTtsClientBuilder {
             connect_timeout: self.connect_timeout,
             receive_timeout: self.receive_timeout,
             request_chunk_reuse: self.request_chunk_reuse,
+            default_output_format: self.default_output_format,
             ws_pool: Arc::new(WsPool {
                 target_idle: self.ws_pool_size,
                 idle_ttl: self.ws_idle_ttl,
@@ -173,6 +183,16 @@ impl EdgeTtsClient {
 
     pub fn new() -> Result<Self> {
         Self::builder().build()
+    }
+
+    pub fn resolve_output_format<'a>(&'a self, requested: &'a str) -> &'a str {
+        if !requested.trim().is_empty() {
+            requested
+        } else if let Some(default_fmt) = self.default_output_format.as_deref() {
+            default_fmt
+        } else {
+            DEFAULT_OUTPUT_FORMAT
+        }
     }
 
     pub async fn list_voices(&self) -> Result<Vec<Voice>> {
@@ -204,6 +224,8 @@ impl EdgeTtsClient {
         options.validate()?;
         let text = text.into();
         let chunks = split_text(&text, TEXT_CHUNK_LIMIT)?;
+        let effective_format = self.resolve_output_format(&options.output_format).to_owned();
+        let cbr_bitrate = cbr_bitrate_bps(&effective_format);
         let client = self.clone();
 
         Ok(Box::pin(try_stream! {
@@ -211,11 +233,16 @@ impl EdgeTtsClient {
                 (
                     $chunk:expr,
                     $cumulative_audio_bytes:ident,
+                    $cumulative_boundary_ticks:ident,
+                    $cbr_bitrate:ident,
                     $audio_received:ident,
                     $pending_error:ident,
                     $buffered_events:expr
                 ) => {{
-                    let offset_compensation = offset_from_audio_bytes($cumulative_audio_bytes);
+                    let offset_compensation = match $cbr_bitrate {
+                        Some(bps) => offset_from_audio_bytes_with_bitrate($cumulative_audio_bytes, bps),
+                        None => $cumulative_boundary_ticks,
+                    };
                     let mut socket = match client.acquire_websocket().await {
                         Ok(socket) => socket,
                         Err(err) => {
@@ -238,6 +265,9 @@ impl EdgeTtsClient {
                                         if let SynthesisEvent::Audio(chunk) = &event {
                                             $cumulative_audio_bytes += chunk.len();
                                             $audio_received = true;
+                                        } else if let SynthesisEvent::Boundary(boundary) = &event {
+                                            $cumulative_boundary_ticks =
+                                                $cumulative_boundary_ticks.max(boundary.offset_ticks + boundary.duration_ticks);
                                         }
                                         yield event;
                                     }
@@ -273,6 +303,7 @@ impl EdgeTtsClient {
             }
 
             let mut cumulative_audio_bytes = 0usize;
+            let mut cumulative_boundary_ticks = 0u64;
             let mut audio_received = false;
             let mut pending_error = None;
             let mut buffered_events = VecDeque::new();
@@ -290,7 +321,10 @@ impl EdgeTtsClient {
                     let mut fallback_at = None;
 
                     for (index, chunk) in chunks.iter().enumerate() {
-                        let offset_compensation = offset_from_audio_bytes(cumulative_audio_bytes);
+                        let offset_compensation = match cbr_bitrate {
+                            Some(bps) => offset_from_audio_bytes_with_bitrate(cumulative_audio_bytes, bps),
+                            None => cumulative_boundary_ticks,
+                        };
                         match client.send_chunk_request(socket.stream_mut(), &options, chunk).await {
                             Ok(()) => {
                                 loop {
@@ -306,6 +340,9 @@ impl EdgeTtsClient {
                                             if let SynthesisEvent::Audio(chunk) = &event {
                                                 cumulative_audio_bytes += chunk.len();
                                                 audio_received = true;
+                                            } else if let SynthesisEvent::Boundary(boundary) = &event {
+                                                cumulative_boundary_ticks =
+                                                    cumulative_boundary_ticks.max(boundary.offset_ticks + boundary.duration_ticks);
                                             }
                                             yield event;
                                         }
@@ -360,6 +397,8 @@ impl EdgeTtsClient {
                             stream_chunk_with_fresh_socket!(
                                 chunk,
                                 cumulative_audio_bytes,
+                                cumulative_boundary_ticks,
+                                cbr_bitrate,
                                 audio_received,
                                 pending_error,
                                 &mut buffered_events
@@ -372,6 +411,8 @@ impl EdgeTtsClient {
                     stream_chunk_with_fresh_socket!(
                         chunk,
                         cumulative_audio_bytes,
+                        cumulative_boundary_ticks,
+                        cbr_bitrate,
                         audio_received,
                         pending_error,
                         &mut buffered_events
@@ -430,7 +471,8 @@ impl EdgeTtsClient {
         options: &SpeakOptions,
         chunk: &str,
     ) -> std::result::Result<(), ChunkFailure> {
-        let config_message = speech_config_message(options.boundary);
+        let output_format = self.resolve_output_format(&options.output_format);
+        let config_message = speech_config_message(options.boundary, output_format);
         let ssml_message = ssml_message(options, chunk).map_err(|err| ChunkFailure {
             err,
             retryable_on_fresh_connection: false,
@@ -551,7 +593,7 @@ impl EdgeTtsClient {
                     });
                 }
                 match headers.get("Content-Type").map(String::as_str) {
-                    Some("audio/mpeg") => {
+                    Some(content_type) if content_type.starts_with("audio/") => {
                         if payload.is_empty() {
                             return Err(ChunkFailure {
                                 err: Error::UnexpectedResponse("audio frame missing payload"),

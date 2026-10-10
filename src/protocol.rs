@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::constants::{
-    MP3_BITRATE_BPS, OUTPUT_FORMAT, SEC_MS_GEC_VERSION, TICKS_PER_SECOND, TRUSTED_CLIENT_TOKEN,
+    MP3_BITRATE_BPS, SEC_MS_GEC_VERSION, TICKS_PER_SECOND, TRUSTED_CLIENT_TOKEN,
 };
 use crate::error::{Error, Result};
 use crate::options::{SpeakOptions, normalize_voice};
@@ -45,7 +45,7 @@ pub fn javascript_timestamp() -> String {
         .to_string()
 }
 
-pub fn speech_config_message(boundary: Boundary) -> String {
+pub fn speech_config_message(boundary: Boundary, output_format: &str) -> String {
     let (word, sentence) = boundary.metadata_flags();
     let payload = json!({
         "context": {
@@ -55,7 +55,7 @@ pub fn speech_config_message(boundary: Boundary) -> String {
                         "sentenceBoundaryEnabled": sentence,
                         "wordBoundaryEnabled": word
                     },
-                    "outputFormat": OUTPUT_FORMAT
+                    "outputFormat": output_format
                 }
             }
         }
@@ -287,8 +287,32 @@ pub fn parse_metadata(payload: &[u8], offset_compensation: u64) -> Result<Vec<Sy
     Ok(events)
 }
 
+pub fn cbr_bitrate_bps(output_format: &str) -> Option<u64> {
+    for part in output_format.split('-') {
+        if let Some(kbits) = part.strip_suffix("kbitrate") {
+            if let Ok(val) = kbits.parse::<u64>() {
+                return Some(val * 1000);
+            }
+        }
+        if let Some(kbps) = part.strip_suffix("kbps") {
+            if let Ok(val) = kbps.parse::<u64>() {
+                return Some(val * 1000);
+            }
+        }
+    }
+    None
+}
+
 pub fn offset_from_audio_bytes(bytes: usize) -> u64 {
-    (bytes as u64 * 8 * TICKS_PER_SECOND) / MP3_BITRATE_BPS
+    offset_from_audio_bytes_with_bitrate(bytes, MP3_BITRATE_BPS)
+}
+
+pub fn offset_from_audio_bytes_with_bitrate(bytes: usize, bitrate_bps: u64) -> u64 {
+    if bitrate_bps == 0 {
+        0
+    } else {
+        (bytes as u64 * 8 * TICKS_PER_SECOND) / bitrate_bps
+    }
 }
 
 fn unescape_xml(text: &str) -> String {

@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use edge_tts_rust::{Boundary, EdgeTtsClient, SpeakOptions, SynthesisEvent, split_text};
+use edge_tts_rust::{
+    Boundary, DEFAULT_OUTPUT_FORMAT_MP3, EdgeTtsClient, SpeakOptions, SynthesisEvent, split_text,
+};
 use futures_util::StreamExt;
 
 const DEFAULT_LONG_CONNECTION_ITERATIONS: usize = 40;
@@ -67,6 +69,36 @@ async fn live_synthesis_smoke_test() -> edge_tts_rust::Result<()> {
 
     assert!(!result.audio.is_empty());
     assert!(!result.boundaries.is_empty());
+    // Default format is WebM Opus; verify EBML header signature [0x1A, 0x45, 0xDF, 0xA3]
+    assert!(result.audio.len() >= 4);
+    assert_eq!(&result.audio[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_synthesis_custom_mp3_format_test() -> edge_tts_rust::Result<()> {
+    if std::env::var_os("EDGE_TTS_ONLINE_TEST").is_none() {
+        return Ok(());
+    }
+
+    let client = EdgeTtsClient::new()?;
+    let result = client
+        .synthesize(
+            "hello from rust",
+            SpeakOptions {
+                voice: "en-US-EmmaMultilingualNeural".into(),
+                boundary: Boundary::Sentence,
+                output_format: DEFAULT_OUTPUT_FORMAT_MP3.into(),
+                ..SpeakOptions::default()
+            },
+        )
+        .await?;
+
+    assert!(!result.audio.is_empty());
+    assert!(!result.boundaries.is_empty());
+    // MP3 format; verify MPEG sync word [0xFF, 0xF3]
+    assert!(result.audio.len() >= 2);
+    assert_eq!(&result.audio[0..2], &[0xFF, 0xF3]);
     Ok(())
 }
 

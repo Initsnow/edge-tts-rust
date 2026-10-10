@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use edge_tts_rust::{Boundary, EdgeTtsClient, SpeakOptions};
+use edge_tts_rust::{
+    Boundary, DEFAULT_OUTPUT_FORMAT, EdgeTtsClient, SpeakOptions, default_extension_for_format,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -12,6 +14,8 @@ struct Cli {
     file: Option<PathBuf>,
     #[arg(long, default_value = "en-US-EmmaMultilingualNeural")]
     voice: String,
+    #[arg(long, alias = "format", default_value = DEFAULT_OUTPUT_FORMAT)]
+    output_format: String,
     #[arg(long, default_value = "+0%")]
     rate: String,
     #[arg(long, default_value = "+0%")]
@@ -70,11 +74,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         volume: cli.volume,
         pitch: cli.pitch,
         boundary: cli.boundary.into(),
+        output_format: cli.output_format,
     };
 
+    let default_media_name = format!(
+        "output.{}",
+        default_extension_for_format(&options.output_format)
+    );
     let media = cli
         .write_media
-        .unwrap_or_else(|| PathBuf::from("output.mp3"));
+        .unwrap_or_else(|| PathBuf::from(default_media_name));
     client
         .save(text, options, media, cli.write_subtitles)
         .await?;

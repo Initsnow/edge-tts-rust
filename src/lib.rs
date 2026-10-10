@@ -7,9 +7,16 @@ mod subtitles;
 mod types;
 
 pub use client::{EdgeTtsClient, EdgeTtsClientBuilder, EventStream, subtitles};
+pub use constants::{
+    DEFAULT_OUTPUT_FORMAT, DEFAULT_OUTPUT_FORMAT_MP3, DEFAULT_OUTPUT_FORMAT_OPUS, DEFAULT_VOICE,
+    OUTPUT_FORMAT,
+};
 pub use error::{Error, Result};
-pub use options::{SpeakOptions, normalize_voice};
-pub use protocol::{build_ssml, parse_binary_headers, parse_headers, parse_metadata, split_text};
+pub use options::{default_extension_for_format, normalize_voice, SpeakOptions};
+pub use protocol::{
+    build_ssml, cbr_bitrate_bps, offset_from_audio_bytes, offset_from_audio_bytes_with_bitrate,
+    parse_binary_headers, parse_headers, parse_metadata, speech_config_message, split_text,
+};
 pub use subtitles::to_srt;
 pub use types::{Boundary, BoundaryEvent, SynthesisEvent, SynthesisResult, Voice, VoiceTag};
 
@@ -17,7 +24,8 @@ pub use types::{Boundary, BoundaryEvent, SynthesisEvent, SynthesisResult, Voice,
 mod tests {
     use super::*;
     use crate::protocol::{
-        build_ssml, offset_from_audio_bytes, parse_headers, parse_metadata, split_text,
+        build_ssml, cbr_bitrate_bps, offset_from_audio_bytes, parse_headers, parse_metadata,
+        speech_config_message, split_text,
     };
 
     #[test]
@@ -106,5 +114,34 @@ mod tests {
             text: "hello".to_owned(),
         }]);
         assert!(srt.contains("00:00:00,000 --> 00:00:01,500"));
+    }
+
+    #[test]
+    fn default_format_is_opus() {
+        assert_eq!(DEFAULT_OUTPUT_FORMAT, "webm-24khz-16bit-mono-opus");
+        let options = SpeakOptions::default();
+        assert_eq!(options.output_format, "webm-24khz-16bit-mono-opus");
+        assert_eq!(default_extension_for_format(&options.output_format), "webm");
+    }
+
+    #[test]
+    fn custom_output_format_in_speech_config() {
+        let msg = speech_config_message(Boundary::Sentence, "audio-24khz-96kbitrate-mono-mp3");
+        assert!(msg.contains("\"outputFormat\":\"audio-24khz-96kbitrate-mono-mp3\""));
+    }
+
+    #[test]
+    fn parses_cbr_bitrates_correctly() {
+        assert_eq!(cbr_bitrate_bps("audio-24khz-48kbitrate-mono-mp3"), Some(48_000));
+        assert_eq!(cbr_bitrate_bps("audio-24khz-96kbitrate-mono-mp3"), Some(96_000));
+        assert_eq!(cbr_bitrate_bps("webm-24khz-16bit-mono-opus"), None);
+    }
+
+    #[test]
+    fn resolves_default_extensions() {
+        assert_eq!(default_extension_for_format("webm-24khz-16bit-mono-opus"), "webm");
+        assert_eq!(default_extension_for_format("audio-24khz-48kbitrate-mono-mp3"), "mp3");
+        assert_eq!(default_extension_for_format("ogg-24khz-16bit-mono-opus"), "opus");
+        assert_eq!(default_extension_for_format("riff-24khz-16bit-mono-pcm"), "wav");
     }
 }

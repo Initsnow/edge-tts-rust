@@ -30,6 +30,20 @@ fn binary_headers_strip_prefix_and_separator() {
 }
 
 #[test]
+fn binary_headers_handles_webm_opus() {
+    let header = b"Path:audio\r\nContent-Type:audio/webm; codec=opus";
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(header.len() as u16).to_be_bytes());
+    frame.extend_from_slice(header);
+    frame.extend_from_slice(b"\r\n");
+    frame.extend_from_slice(b"\x1a\x45\xdf\xa3");
+    let (headers, payload) = parse_binary_headers(&frame, header.len()).unwrap();
+    assert_eq!(headers.get("Path").unwrap(), "audio");
+    assert_eq!(headers.get("Content-Type").unwrap(), "audio/webm; codec=opus");
+    assert_eq!(payload, b"\x1a\x45\xdf\xa3");
+}
+
+#[test]
 fn metadata_unescapes_xml_text() {
     let payload = br#"{"Metadata":[{"Type":"SentenceBoundary","Data":{"Offset":10,"Duration":20,"text":{"Text":"Tom &amp; Jerry"}}}]}"#;
     let events = parse_metadata(payload, 5).unwrap();

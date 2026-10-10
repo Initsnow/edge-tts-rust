@@ -1,4 +1,4 @@
-use crate::constants::DEFAULT_VOICE;
+use crate::constants::{DEFAULT_OUTPUT_FORMAT, DEFAULT_VOICE};
 use crate::error::{Error, Result};
 use crate::types::Boundary;
 
@@ -9,6 +9,7 @@ pub struct SpeakOptions {
     pub volume: String,
     pub pitch: String,
     pub boundary: Boundary,
+    pub output_format: String,
 }
 
 impl Default for SpeakOptions {
@@ -19,11 +20,17 @@ impl Default for SpeakOptions {
             volume: "+0%".to_owned(),
             pitch: "+0Hz".to_owned(),
             boundary: Boundary::Sentence,
+            output_format: DEFAULT_OUTPUT_FORMAT.to_owned(),
         }
     }
 }
 
 impl SpeakOptions {
+    pub fn with_output_format(mut self, format: impl Into<String>) -> Self {
+        self.output_format = format.into();
+        self
+    }
+
     pub fn validate(&self) -> Result<()> {
         let normalized = normalize_voice(&self.voice)?;
         validate_voice(&normalized)?;
@@ -34,7 +41,25 @@ impl SpeakOptions {
         if !self.pitch.ends_with("Hz") {
             return Err(Error::InvalidPitch(self.pitch.clone()));
         }
+        if self.output_format.trim().is_empty() {
+            return Err(Error::InvalidOutputFormat(self.output_format.clone()));
+        }
         Ok(())
+    }
+}
+
+pub fn default_extension_for_format(output_format: &str) -> &'static str {
+    if output_format.contains("webm") {
+        "webm"
+    } else if output_format.contains("opus") || output_format.contains("ogg") {
+        "opus"
+    } else if output_format.contains("wav")
+        || output_format.contains("pcm")
+        || output_format.contains("riff")
+    {
+        "wav"
+    } else {
+        "mp3"
     }
 }
 

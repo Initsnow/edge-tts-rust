@@ -11,7 +11,7 @@ async fn main() -> edge_tts_rust::Result<()> {
                 boundary: Boundary::Sentence,
                 ..SpeakOptions::default()
             },
-            "/tmp/example-edge-tts.mp3",
+            "/tmp/example-edge-tts.webm",
             Some("/tmp/example-edge-tts.srt"),
         )
         .await?;

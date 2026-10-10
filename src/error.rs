@@ -10,6 +10,8 @@ pub enum Error {
     InvalidPitch(String),
     #[error("invalid voice value: {0}")]
     InvalidVoice(String),
+    #[error("invalid output format: {0}")]
+    InvalidOutputFormat(String),
     #[error("text chunk size must be greater than zero")]
     InvalidChunkSize,
     #[error("failed to split text safely")]

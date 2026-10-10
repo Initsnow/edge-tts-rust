@@ -26,7 +26,13 @@ cargo build --release
 ## CLI
 
 ```bash
-cargo run -- --text "Hello, world" --voice en-US-EmmaMultilingualNeural --write-media out.mp3 --write-subtitles out.srt
+cargo run -- --text "Hello, world" --voice en-US-EmmaMultilingualNeural --write-media out.webm --write-subtitles out.srt
+```
+
+Specify custom audio output format (default is Opus: `webm-24khz-16bit-mono-opus`):
+
+```bash
+cargo run -- --text "Hello, world" --output-format audio-24khz-48kbitrate-mono-mp3 --write-media out.mp3
 ```
 
 List voices:
@@ -49,6 +55,9 @@ async fn main() -> edge_tts_rust::Result<()> {
             SpeakOptions {
                 voice: "en-US-EmmaMultilingualNeural".into(),
                 boundary: Boundary::Sentence,
+                // Default output format is "webm-24khz-16bit-mono-opus" (Opus)
+                // You can also customize it:
+                // output_format: "audio-24khz-48kbitrate-mono-mp3".into(),
                 ..SpeakOptions::default()
             },
         )
