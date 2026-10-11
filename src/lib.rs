@@ -5,6 +5,7 @@ mod options;
 mod protocol;
 mod subtitles;
 mod types;
+pub mod webm;
 
 pub use client::{EdgeTtsClient, EdgeTtsClientBuilder, EventStream, subtitles};
 pub use constants::{
@@ -13,6 +14,7 @@ pub use constants::{
 };
 pub use error::{Error, Result};
 pub use options::{default_extension_for_format, normalize_voice, SpeakOptions};
+pub use webm::finalize_webm;
 pub use protocol::{
     build_ssml, cbr_bitrate_bps, offset_from_audio_bytes, offset_from_audio_bytes_with_bitrate,
     parse_binary_headers, parse_headers, parse_metadata, speech_config_message, split_text,

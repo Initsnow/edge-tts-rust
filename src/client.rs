@@ -451,6 +451,8 @@ impl EdgeTtsClient {
             }
         }
 
+        let audio = crate::webm::finalize_webm(&audio);
+
         Ok(SynthesisResult { audio, boundaries })
     }
 
