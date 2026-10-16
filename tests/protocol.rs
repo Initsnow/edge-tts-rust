@@ -103,3 +103,15 @@ fn srt_output_is_stable() {
     }]);
     assert_eq!(srt, "1\n00:00:00,000 --> 00:00:02,000\nhello\n\n");
 }
+
+#[test]
+fn sec_ms_gec_v2_matches_reference() {
+    use edge_tts_rust::generate_sec_ms_gec_v2_from_ticks;
+    let ticks = 133444734000000000u64;
+    let token = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+    let gec = generate_sec_ms_gec_v2_from_ticks(ticks, token);
+    assert_eq!(
+        gec,
+        "2CD23A2CA0B2595A-F3C846C370E05F9CC83ACC5F995C5F5D87A4D0F14CE8936A0F902E64099E38A2"
+    );
+}

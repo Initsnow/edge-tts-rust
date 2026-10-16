@@ -16,8 +16,9 @@ pub use error::{Error, Result};
 pub use options::{default_extension_for_format, normalize_voice, SpeakOptions};
 pub use webm::finalize_webm;
 pub use protocol::{
-    build_ssml, cbr_bitrate_bps, offset_from_audio_bytes, offset_from_audio_bytes_with_bitrate,
-    parse_binary_headers, parse_headers, parse_metadata, speech_config_message, split_text,
+    build_ssml, cbr_bitrate_bps, generate_sec_ms_gec, generate_sec_ms_gec_v2_from_ticks,
+    offset_from_audio_bytes, offset_from_audio_bytes_with_bitrate, parse_binary_headers,
+    parse_headers, parse_metadata, speech_config_message, split_text,
 };
 pub use subtitles::to_srt;
 pub use types::{Boundary, BoundaryEvent, SynthesisEvent, SynthesisResult, Voice, VoiceTag};

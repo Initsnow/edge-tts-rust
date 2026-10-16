@@ -9,10 +9,10 @@ pub const TEXT_CHUNK_LIMIT: usize = 4096;
 pub const TICKS_PER_SECOND: u64 = 10_000_000;
 pub const MP3_BITRATE_BPS: u64 = 48_000;
 pub const CHROMIUM_MAJOR_VERSION: &str = "143";
-pub const SEC_MS_GEC_VERSION: &str = "1-143.0.3650.75";
+pub const SEC_MS_GEC_VERSION: &str = "2-143.0.3650.75";
 
 pub fn websocket_url() -> String {
-    format!("wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={TRUSTED_CLIENT_TOKEN}")
+    format!("wss://{BASE_URL}/edge/v1?TrustedClientToken={TRUSTED_CLIENT_TOKEN}")
 }
 
 pub fn voice_list_url() -> String {
